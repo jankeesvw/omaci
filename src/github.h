@@ -34,6 +34,10 @@ QVariantList parseRuns(const QByteArray &json, QString *error = nullptr);
 QVariantList parseJobs(const QByteArray &json, QString *error = nullptr);
 // A page of the repositories the user can see, as `user/repos` gives them.
 QVariantList parseRepositories(const QByteArray &json, QString *error = nullptr);
+// Repositories with recently updated PRs by the requested author, newest first.
+QVariantList parseAuthoredRepositories(const QByteArray &json, const QString &author, QString *error);
+// Attribute runs using pull request numbers and exact head commits.
+void attachPullAuthors(QVariantList &runs, const QVariantList &pullRequests);
 
 // owner/name for the URL of a git remote on github.com, in any of the forms
 // git accepts (scp-like, ssh://, https://), or empty for anything else.

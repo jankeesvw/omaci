@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QHash>
+#include <QList>
 #include <QObject>
 #include <QSet>
 #include <QTimer>
@@ -12,12 +13,16 @@
 #include "failures.h"
 #include "logmodel.h"
 
-// Watches the builds of one repository through the gh CLI, which already
+// Watches builds in a repository or organization through the gh CLI, which
 // holds the user's login. A build is a commit with all its workflow runs
 // rolled up. Polls quickly while one is running and slowly when all are done.
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString repo READ repo NOTIFY repoChanged)
+    Q_PROPERTY(bool demo READ demo CONSTANT)
+    Q_PROPERTY(QString organization READ organization NOTIFY repoChanged)
+    Q_PROPERTY(QString pullAuthor READ pullAuthor NOTIFY buildsChanged)
+    Q_PROPERTY(QString organizationProgress READ organizationProgress NOTIFY organizationProgressChanged)
     Q_PROPERTY(QVariantList builds READ builds NOTIFY buildsChanged)
     Q_PROPERTY(QString selectedKey READ selectedKey NOTIFY selectionChanged)
     Q_PROPERTY(int selectedIndex READ selectedIndex NOTIFY selectionChanged)
@@ -36,10 +41,10 @@ class Backend : public QObject {
     Q_PROPERTY(QString cameFrom READ cameFrom NOTIFY selectionChanged)
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
-    Q_PROPERTY(QDateTime lastUpdated READ lastUpdated NOTIFY buildsChanged)
+    Q_PROPERTY(QDateTime lastUpdated READ lastUpdated NOTIFY lastUpdatedChanged)
     Q_PROPERTY(QString branchFilter READ branchFilter NOTIFY buildsChanged)
     // The repository's default branch, so the window can set its builds apart.
-    Q_PROPERTY(QString mainBranch READ baseBranch NOTIFY buildsChanged)
+    Q_PROPERTY(QString mainBranch READ mainBranch NOTIFY selectionChanged)
     Q_PROPERTY(bool mainOnly READ mainOnly NOTIFY buildsChanged)
     Q_PROPERTY(bool runningOnly READ runningOnly NOTIFY buildsChanged)
     Q_PROPERTY(bool showSkipped READ showSkipped NOTIFY buildsChanged)
@@ -57,6 +62,10 @@ public:
     void setOffline(bool offline) { m_offline = offline; }
 
     QString repo() const { return m_repo; }
+    bool demo() const { return m_demo; }
+    QString organization() const { return m_repo.startsWith("org:") ? m_repo.mid(4) : QString(); }
+    QString pullAuthor() const { return m_pullAuthor; }
+    QString organizationProgress() const;
     QVariantList builds() const { return m_builds; }
     QString selectedKey() const { return m_key; }
     int selectedIndex() const;
@@ -78,7 +87,9 @@ public:
     bool busy() const { return m_running > 0; }
     QDateTime lastUpdated() const { return m_lastUpdated; }
     QString branchFilter() const { return m_branch; }
-    bool mainOnly() const { return !m_branch.isEmpty() && m_branch == baseBranch(); }
+    QString mainBranch() const { return baseBranch(selectedBuild()); }
+    bool mainOnly() const { return organization().isEmpty() ? !m_branch.isEmpty() && m_branch == mainBranch()
+                                                            : m_orgMainOnly; }
     bool runningOnly() const { return m_runningOnly; }
     bool showSkipped() const { return m_showSkipped; }
     int activeCount() const;
@@ -116,6 +127,7 @@ public:
     // Only the builds that are running or waiting for a runner, and back.
     Q_INVOKABLE void toggleRunning();
     Q_INVOKABLE void toggleSkipped();
+    Q_INVOKABLE void setPullAuthor(const QString &author);
 
     // The address of the picked job, or of its run when no job is picked.
     Q_INVOKABLE QString shareUrl() const;
@@ -136,6 +148,7 @@ public:
 signals:
     void repoChanged();
     void buildsChanged();
+    void lastUpdatedChanged();
     void jobsChanged();
     void stepsChanged();
     void selectionChanged();
@@ -147,6 +160,7 @@ signals:
     void previousChanged();
     void errorChanged();
     void busyChanged();
+    void organizationProgressChanged();
     void repositoriesChanged();
     void buildFinished(const QVariantMap &build);
 
@@ -155,6 +169,7 @@ private:
     struct Call {
         QStringList args;
         Done done;
+        quint64 organizationPoll = 0;
     };
     struct Kept {
         QByteArray etag;
@@ -165,15 +180,52 @@ private:
         bool final = false;
         QString updatedAt;
     };
+    struct OrganizationPoll {
+        QVariantList repositories;
+        qsizetype next = 0;
+        int pending = 0;
+        int receivedRuns = 0;
+        bool force = false;
+        bool changed = false;
+        bool checkedSelection = false;
+        bool catalogLoaded = false;
+        bool emptyScope = false;
+    };
+    struct RepositoryActivity {
+        qint64 checkedAt = 0;
+        qint64 lastRun = 0;
+        bool active = false;
+        bool failed = false;
+    };
+    using RepositoryRuns = QHash<QString, QVariantList>;
 
-    void gh(const QStringList &args, Done done);
+    void gh(const QStringList &args, Done done, quint64 organizationPoll = 0);
     void pump();
-    void api(const QString &path, Done done);
+    qint64 requestAvailableAt(bool graphql) const;
+    void noteRateLimit(bool graphql, const QByteArray &output, const QString &error);
+    void api(const QString &path, Done done, const QString &projection = {}, quint64 organizationPoll = 0);
+    void refreshRuns(bool force);
+    void fetchOrganizationPage(int page);
+    void fetchAuthoredRepositories();
+    void startOrganizationRuns(const QVariantList &repositories);
+    qint64 organizationRepositoryDue(const QVariantMap &repository, qint64 now) const;
+    void fetchOrganizationRuns();
+    void fetchOrganizationRepository(const QVariantMap &repository);
+    void finishOrganizationRepository(const QString &repository, const QVariantList &runs,
+                                      const QString &error, bool receivedRuns);
+    void recordOrganizationActivity(const QString &repository, const QVariantList &runs, bool receivedRuns);
+    void failOrganizationPoll(const QString &error);
+    void flushOrganizationChanges();
+    void publishOrganizationRuns();
+    RepositoryRuns &organizationRuns();
+    QHash<QString, QString> &organizationErrors();
+    void applySnapshot(const QVariantList &runs);
+    void markUpdated();
     void rebuild();
     void filterBuilds();
     void fetchCommit();
     void fetchJobs();
-    void fetchRunJobs(qlonglong runId, bool final, const QString &updatedAt);
+    void fetchRunJobs(const QVariantMap &run, bool final);
     void fetchLog();
     void rebuildJobs();
     void computeEstimate();
@@ -182,11 +234,15 @@ private:
     void fetchRepositoryPage(int page, const QVariantList &found, bool showPages);
     void setRepositories(const QVariantList &repositories);
     void remember(const QString &repo);
-    QString baseBranch() const;
+    QString baseBranch(const QVariantMap &build) const;
+    QString repositoryOf(const QVariantMap &value) const;
+    bool matchesPullAuthor(const QVariantMap &build) const;
     void annotateLog();
     void pickJob();
     void clearJob();
     QVariantMap buildByKey(const QString &key) const;
+    bool hasVisibleBuild(const QString &key) const;
+    QVariantList comparisonBuilds(const QVariantMap &build) const;
     QList<Estimate::Earlier> earlierBuilds(const QVariantList &like) const;
     QHash<QString, double> usualSteps(const QString &jobKey) const;
     void setError(const QString &error);
@@ -195,6 +251,7 @@ private:
     void notify(const QVariantMap &build);
 
     QString m_repo;
+    quint64 m_scope = 0;
     QString m_gh;
     bool m_demo = false;
     bool m_offline = false;
@@ -202,11 +259,17 @@ private:
 
     QList<Call> m_queue;
     int m_running = 0;
+    qint64 m_restRetryAt = 0;
+    qint64 m_graphqlRetryAt = 0;
+    qint64 m_secondaryRetryAt = 0;
+    qint64 m_secondaryBackoff = 0;
+    QTimer m_requestWake;
     QHash<QString, Kept> m_kept;
 
     QVariantList m_listRuns;
     QVariantList m_extraRuns;
     QVariantList m_allBuilds;
+    QHash<QString, QVariantList> m_buildsByRepository;
     QVariantList m_builds;
     QString m_key;
     QString m_wantCommit;
@@ -240,6 +303,25 @@ private:
     QString m_error;
     QDateTime m_lastUpdated;
     QString m_branch;
+    QString m_pullAuthor;
+    bool m_orgMainOnly = false;
+    quint64 m_orgPollId = 0;
+    OrganizationPoll m_orgPoll;
+    QVariantList m_orgCatalog;
+    qint64 m_orgCatalogCheckedAt = 0;
+    qint64 m_orgCatalogFirstCheckedAt = 0;
+    QString m_orgCatalogError;
+    QDateTime m_orgUnfilteredUpdated;
+    bool m_orgRefreshRequested = false;
+    qint64 m_orgManualStartedAt = 0;
+    qsizetype m_orgManualTotal = 0;
+    QSet<QString> m_orgManualRemaining;
+    QHash<QString, RepositoryActivity> m_orgActivity;
+    RepositoryRuns m_orgRuns;
+    RepositoryRuns m_orgAuthorRuns;
+    QHash<QString, QString> m_orgErrors;
+    QHash<QString, QString> m_orgAuthorErrors;
+    QTimer m_orgPublishTimer;
     bool m_showSkipped = false;
     bool m_runningOnly = false;
     QVariantList m_repositories;

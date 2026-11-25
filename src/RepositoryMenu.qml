@@ -1,16 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 
-// Which repository to watch, from every one the gh login can see, the most
-// recently pushed first. Typing narrows the list, the arrows move through
-// it and Enter opens one; a whole owner/name that isn't in the list can be
-// opened as typed, for a public repository of somebody else's.
+// Pick a repository or watch all accessible repositories in an organization.
 Rectangle {
     id: menu
     objectName: "repositoryMenu"
     property bool open: false
     // Nothing to go back to: the window has no repository yet.
     property bool required: false
+    property bool allowOrganizations: true
     property var repositories: []
     property bool loading: false
     property string error: ""
@@ -27,6 +25,18 @@ Rectangle {
     readonly property string typed: input.text.trim()
     // Every word has to be in the name, so "wbso app" finds wbso-ai/application.
     readonly property var shown: {
+        const orgPrefix = /^org:/i.test(typed)
+        const slug = (orgPrefix ? typed.slice(4) : typed).toLowerCase()
+        const organizations = allowOrganizations
+            ? Array.from(new Set(repositories.map(repo => repo.organization).filter(Boolean))) : []
+        const orgs = organizations.filter(name => orgPrefix ? name.toLowerCase().includes(slug)
+                                                           : name.toLowerCase() === slug)
+        if (allowOrganizations && orgPrefix && /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(slug)
+                && !orgs.some(name => name.toLowerCase() === slug))
+            orgs.unshift(slug)
+        orgs.sort((a, b) => Number(b.toLowerCase() === slug) - Number(a.toLowerCase() === slug))
+        const targets = orgs.map(name => ({ name: "org:" + name.toLowerCase(), org: name }))
+        if (orgPrefix) return targets
         const words = typed.toLowerCase().split(/\s+/).filter(word => word)
         const found = repositories.filter(repo => {
             const name = repo.name.toLowerCase()
@@ -35,7 +45,7 @@ Rectangle {
         const whole = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(typed)
         if (whole && !repositories.some(repo => repo.name.toLowerCase() === typed.toLowerCase()))
             found.unshift({ name: typed, typed: true })
-        return found
+        return targets.concat(found)
     }
 
     function ago(iso) {
@@ -84,10 +94,8 @@ Rectangle {
 
         Panel {
             anchors.fill: parent
-            title: "repositories"
-            note: menu.loading ? "asking github…"
-                : menu.typed ? menu.shown.filter(repo => !repo.typed).length + " of " + menu.repositories.length
-                : menu.repositories.length ? menu.repositories.length + " you can see" : ""
+            title: menu.allowOrganizations ? "repositories & organizations" : "repositories"
+            note: menu.loading ? "asking github…" : menu.shown.length + " available"
             corner: menu.required ? "pick one to watch" : "esc closes"
             focused: true
 
@@ -138,7 +146,7 @@ Rectangle {
                     x: input.x
                     y: 4
                     visible: input.text === ""
-                    text: "type to narrow it down, or a whole owner/name"
+                    text: menu.allowOrganizations ? "search, or enter owner/name or org:name" : "search, or enter owner/name"
                     color: theme.faint
                 }
             }
@@ -188,9 +196,9 @@ Rectangle {
                         width: row.nameCells * menu.cw
                         clip: true
                         Mono { text: row.modelData.typed ? "open " : ""; color: theme.accent; visible: text !== "" }
-                        Mono { text: row.modelData.name.split("/")[0] + "/"; color: theme.dim }
+                        Mono { text: row.modelData.org ? "" : row.modelData.name.split("/")[0] + "/"; color: theme.dim }
                         Mono {
-                            text: row.modelData.name.split("/").slice(1).join("/")
+                            text: row.modelData.org || row.modelData.name.split("/").slice(1).join("/")
                             color: row.modelData.archived ? theme.dim : theme.text
                             font.bold: row.picked || row.watching
                         }
@@ -199,7 +207,8 @@ Rectangle {
                         x: name.x + name.width + menu.cw * 2
                         anchors.verticalCenter: parent.verticalCenter
                         width: when.x - x - menu.cw * 2
-                        text: row.modelData.typed ? "not one of yours; opens if gh can see it" : (row.modelData.description || "")
+                        text: row.modelData.org ? "watch this organization"
+                            : row.modelData.typed ? "opens if your GitHub account has access" : (row.modelData.description || "")
                         color: theme.dim
                         elide: Text.ElideRight
                     }
@@ -208,7 +217,8 @@ Rectangle {
                         anchors.right: parent.right
                         anchors.rightMargin: menu.cw
                         anchors.verticalCenter: parent.verticalCenter
-                        text: row.watching ? "watching" : row.modelData.archived ? "archived" : menu.ago(row.modelData.pushedAt)
+                        text: row.watching ? "watching" : row.modelData.org ? "organization"
+                            : row.modelData.archived ? "archived" : menu.ago(row.modelData.pushedAt)
                         color: row.watching ? theme.accent : theme.faint
                     }
                     MouseArea {
@@ -224,7 +234,7 @@ Rectangle {
                     anchors.centerIn: parent
                     visible: list.count === 0
                     text: menu.loading ? "asking github which repositories you can see…"
-                        : menu.typed ? "none of yours is called that"
+                        : menu.typed ? "no matching repositories or organizations"
                         : menu.error ? "" : "no repositories"
                     color: theme.dim
                 }

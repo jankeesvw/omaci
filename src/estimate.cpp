@@ -25,7 +25,8 @@ QVariantList likeBuilds(const QVariantList &builds, const QVariantMap &build, in
     for (const auto &value : builds) {
         const auto other = value.toMap();
         const auto state = other["state"].toString();
-        if (other["key"] == build["key"] || !other["isBuild"].toBool() || GitHub::isActive(state) ||
+        if (other["repository"] != build["repository"] || other["key"] == build["key"] ||
+            !other["isBuild"].toBool() || GitHub::isActive(state) ||
             state == "skipped" || GitHub::ms(other["startedAt"].toString()) > started)
             continue;
         const bool passed = state == "success";

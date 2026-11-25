@@ -6,7 +6,7 @@ import "format.js" as Format
 // last one is this build. ▅▆▅▆▃▅▆▁▆▅▇
 Row {
     id: strip
-    property var builds: []       // { key, seconds, state, title, sha, current }
+    property var builds: []       // { key, seconds, state, title, sha, current, selectable }
     property real currentSeconds: 0
     property real typical: 0
     property string hovered: ""
@@ -36,11 +36,11 @@ Row {
                 id: area
                 anchors.fill: parent
                 hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
+                cursorShape: modelData.selectable ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onContainsMouseChanged: strip.hovered = !containsMouse ? ""
                     : modelData.title + " · " + (parent.going ? "running"
                         : Format.duration(modelData.seconds) + ", " + ({ "success": "passed", "failure": "failed", "cancelled": "cancelled" }[modelData.state] || modelData.state))
-                onClicked: strip.picked(modelData.key)
+                onClicked: if (modelData.selectable) strip.picked(modelData.key)
             }
         }
     }

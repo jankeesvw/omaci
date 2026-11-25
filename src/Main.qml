@@ -17,7 +17,7 @@ ApplicationWindow {
     visible: true
     // The answer in the title too, where the compositor and the window
     // switcher show it without the window being in front.
-    title: "Omaci" + (backend.repo ? " · " + backend.repo : "") + (win.buildActive && win.headline ? " · " + win.headline : "")
+    title: "Omaci" + (watchLabel ? " · " + watchLabel : "") + (win.buildActive && win.headline ? " · " + win.headline : "")
     color: theme.background
 
     readonly property real cw: theme.cellWidth
@@ -27,6 +27,8 @@ ApplicationWindow {
     readonly property var job: backend.selectedJob
     readonly property var estimate: backend.estimate
     readonly property bool buildActive: build.state === "running" || build.state === "queued"
+    readonly property bool watchingOrg: backend.organization !== ""
+    readonly property string watchLabel: watchingOrg ? backend.organization + " (org)" : backend.repo
 
     property bool helpVisible: false
     property bool repoMenuVisible: false
@@ -235,6 +237,7 @@ ApplicationWindow {
     }
     Shortcut { sequence: "Q"; onActivated: Qt.quit() }
     Shortcut { sequence: "G"; onActivated: { win.helpVisible = false; win.repoMenuVisible = true } }
+    Shortcut { sequence: "U"; enabled: win.watchingOrg; onActivated: authorPopup.open() }
     Shortcut { sequences: ["Space", "R", "Ctrl+R"]; onActivated: backend.refresh() }
     Shortcut { sequences: ["J", "Down"]; onActivated: win.moveBuild(1) }
     Shortcut { sequences: ["K", "Up"]; onActivated: win.moveBuild(-1) }
@@ -252,7 +255,7 @@ ApplicationWindow {
     Shortcut { sequence: "W"; onActivated: win.toggleWrap() }
     Shortcut { sequence: "B"; onActivated: { win.focusPanel = "builds"; backend.selectPrevious() } }
     Shortcut { sequence: "Shift+B"; onActivated: { win.focusPanel = "builds"; backend.selectCameFrom() } }
-    Shortcut { sequence: "F"; onActivated: backend.toggleBranch() }
+    Shortcut { sequence: "F"; enabled: !win.watchingOrg; onActivated: backend.toggleBranch() }
     Shortcut { sequence: "S"; onActivated: backend.toggleSkipped() }
     Shortcut { sequence: "M"; onActivated: { win.focusPanel = "builds"; backend.toggleMain() } }
     Shortcut { sequence: "A"; onActivated: { win.focusPanel = "builds"; backend.toggleRunning() } }
@@ -280,7 +283,7 @@ ApplicationWindow {
                 Mono { text: "omaci"; color: theme.accent; font.bold: true }
                 Keycap {
                     key: "g"
-                    label: backend.repo || "pick a repository"
+                    label: win.watchLabel || "pick a repository or org"
                     strong: true
                     onClicked: win.repoMenuVisible = true
                 }
@@ -289,16 +292,24 @@ ApplicationWindow {
                 Mono { text: "filter"; color: theme.faint }
                 Toggle {
                     key: "m"
-                    label: backend.mainBranch || "main"
+                    label: win.watchingOrg ? "default branch" : backend.mainBranch || "main"
                     checked: backend.mainOnly
                     onClicked: { win.focusPanel = "builds"; backend.toggleMain() }
                 }
                 Toggle {
+                    visible: !win.watchingOrg
                     key: "f"
                     label: backend.branchFilter && !backend.mainOnly ? backend.branchFilter : "this branch"
                     checked: backend.branchFilter !== "" && !backend.mainOnly
                     active: backend.branchFilter !== "" || win.build.branch !== undefined
                     onClicked: { win.focusPanel = "builds"; backend.toggleBranch() }
+                }
+                Keycap {
+                    visible: win.watchingOrg
+                    key: "u"
+                    strong: backend.pullAuthor !== ""
+                    label: backend.pullAuthor ? "@" + backend.pullAuthor : "PR author"
+                    onClicked: authorPopup.open()
                 }
                 Toggle {
                     key: "a"
@@ -354,7 +365,8 @@ ApplicationWindow {
                 Layout.preferredWidth: Math.round(Math.max(34, Math.min(42, win.width / win.cw * 0.23)) * win.cw)
                 Layout.fillHeight: true
                 title: "builds"
-                note: [backend.branchFilter ? "only " + backend.branchFilter : "", backend.runningOnly ? "running" : ""].filter(part => part).join(" · ")
+                note: backend.organizationProgress
+                    || [backend.branchFilter ? "only " + backend.branchFilter : "", backend.runningOnly ? "running" : ""].filter(Boolean).join(" · ")
                 corner: backend.builds.length ? (backend.selectedIndex + 1) + "/" + backend.builds.length : ""
                 focused: win.focusPanel === "builds"
 
@@ -381,13 +393,14 @@ ApplicationWindow {
                         // Main is the trunk the list hangs from, the way git
                         // draws a graph: its builds sit on the line, the
                         // builds of every other branch hang off it, set in.
-                        readonly property bool onMain: modelData.isBuild && modelData.branch === backend.mainBranch
+                        readonly property bool onMain: modelData.isBuild
+                            && modelData.branch === (win.watchingOrg ? modelData.defaultBranch : backend.mainBranch)
                         readonly property real trunkX: Math.round(win.cw * 1.5)
                         readonly property real rule: Math.max(1, Math.round(win.cw / 6))
                         readonly property real textX: win.cw * (onMain ? 3 : 5)
                         readonly property int barCells: Math.max(4, Math.floor((width - textX) / win.cw) - 2)
                         width: ListView.view.width
-                        height: Math.round(win.ch * (active ? 3 : 2) + 10)
+                        height: Math.round(win.ch * (2 + Number(active) + Number(win.watchingOrg)) + 10)
                         radius: Math.min(4, theme.radius)
                         color: current ? theme.raised : (mouse.containsMouse ? theme.hover : "transparent")
 
@@ -458,11 +471,21 @@ ApplicationWindow {
                                 : Format.duration(buildRow.elapsed)
                             color: buildRow.active ? theme.accent : theme.dim
                         }
+                        Mono {
+                            visible: win.watchingOrg
+                            x: buildRow.textX
+                            y: 5 + win.ch * 2
+                            width: parent.width - x - win.cw
+                            text: modelData.repository.split("/").pop()
+                                  + modelData.pullAuthors.map(author => " · @" + author).join("")
+                            color: theme.dim
+                            elide: Text.ElideRight
+                        }
                         // How far a running build is, on the row itself.
                         Item {
                             visible: buildRow.active
                             x: buildRow.textX
-                            y: 5 + win.ch * 2
+                            y: 5 + win.ch * (win.watchingOrg ? 3 : 2)
                             Blocks { cells: buildRow.barCells; color: theme.dim; shade: 0.28 }
                             Blocks {
                                 visible: buildRow.total > 0
@@ -480,8 +503,12 @@ ApplicationWindow {
 
                     Mono {
                         anchors.centerIn: parent
-                        visible: buildList.count === 0 && !isNaN(backend.lastUpdated.getTime())
-                        text: backend.runningOnly && backend.activeCount === 0 ? "nothing is running right now" : "no builds match this filter"
+                        visible: buildList.count === 0 && backend.organizationProgress === "" && !isNaN(backend.lastUpdated.getTime())
+                        text: backend.runningOnly && backend.pullAuthor ? "no running builds for @" + backend.pullAuthor
+                            : backend.runningOnly ? "nothing is running right now"
+                            : backend.pullAuthor ? "no builds for @" + backend.pullAuthor : "no builds match this filter"
+                        width: Math.min(implicitWidth, parent.width - win.cw * 2)
+                        elide: Text.ElideRight
                         color: theme.dim
                     }
                 }
@@ -500,6 +527,7 @@ ApplicationWindow {
                     visible: !win.tall
                     title: "build"
                     note: !win.build.key ? ""
+                        : win.watchingOrg ? [win.build.repository, win.build.branch, win.build.sha].filter(Boolean).join(" · ")
                         : win.build.branch === backend.mainBranch ? [win.build.branch, win.build.sha].join(" · ")
                         : [win.build.branch, "not on " + backend.mainBranch, win.build.sha].filter(part => part).join(" · ")
                     corner: win.build.failing ? "failing" : (win.build.state || "")
@@ -551,7 +579,8 @@ ApplicationWindow {
                                     const b = win.build
                                     if (!b.key) return ""
                                     win.now
-                                    return [b.event, b.actor, (b.workflows || []).join(" + "),
+                                    const authors = b.pullAuthors.map(author => "@" + author).join(", ")
+                                    return [b.event, authors ? "PR by " + authors : b.actor, (b.workflows || []).join(" + "),
                                             "started " + win.ago(b.startedAt)].filter(part => part).join(" · ")
                                 }
                             }
@@ -625,6 +654,7 @@ ApplicationWindow {
                             MouseArea {
                                 id: previousMouse
                                 anchors.fill: parent
+                                enabled: previousRow.was.selectable || false
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: backend.selectPrevious()
@@ -679,7 +709,7 @@ ApplicationWindow {
                                     label: "back to " + backend.cameFrom
                                     onClicked: backend.selectCameFrom()
                                 }
-                                Keycap { key: "b"; label: "go to it"; onClicked: backend.selectPrevious() }
+                                Keycap { visible: previousMouse.enabled; key: "b"; label: "go to it"; onClicked: backend.selectPrevious() }
                             }
                         }
                     }
@@ -1134,6 +1164,7 @@ ApplicationWindow {
     RepositoryMenu {
         open: win.repoMenuVisible || backend.repo === ""
         required: backend.repo === ""
+        allowOrganizations: !backend.demo
         repositories: backend.repositories
         loading: backend.repositoriesLoading
         error: backend.repositoriesError
@@ -1147,6 +1178,71 @@ ApplicationWindow {
             backend.show(name, "")
         }
         onClosed: win.repoMenuVisible = false
+    }
+
+    Popup {
+        id: authorPopup
+        objectName: "authorFilter"
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(win.width - win.cw * 6, win.cw * 52)
+        padding: 0
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle { color: theme.background; radius: theme.radius }
+
+        function apply(author) {
+            backend.setPullAuthor(author)
+            close()
+        }
+        onOpened: {
+            authorInput.text = backend.pullAuthor
+            authorInput.forceActiveFocus()
+            authorInput.selectAll()
+        }
+
+        contentItem: Panel {
+            title: "PR author"
+            focused: true
+            contentHeight: authorFields.implicitHeight
+            ColumnLayout {
+                id: authorFields
+                width: parent.width
+                spacing: 6
+                TextField {
+                    id: authorInput
+                    objectName: "authorInput"
+                    Layout.fillWidth: true
+                    placeholderText: "GitHub username"
+                    placeholderTextColor: theme.faint
+                    font.family: theme.font
+                    font.pixelSize: theme.textSize
+                    color: theme.text
+                    selectionColor: theme.accentSoft
+                    selectedTextColor: theme.text
+                    background: Rectangle { color: theme.raised; radius: theme.radius }
+                    maximumLength: 80
+                    Keys.onShortcutOverride: event => event.accepted = true
+                    Keys.onEscapePressed: authorPopup.close()
+                    onAccepted: authorPopup.apply(text)
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Keycap { key: "enter"; label: "apply"; onClicked: authorPopup.apply(authorInput.text) }
+                    Item { Layout.fillWidth: true }
+                    Button {
+                        visible: backend.pullAuthor !== ""
+                        text: "Clear filter"
+                        font.family: theme.font
+                        font.pixelSize: theme.textSize
+                        contentItem: Mono { text: parent.text; color: theme.dim }
+                        background: Rectangle { color: parent.hovered ? theme.hover : "transparent"; radius: theme.radius }
+                        onClicked: authorPopup.apply("")
+                    }
+                }
+            }
+        }
     }
 
     // Every shortcut, on ?.
@@ -1192,13 +1288,13 @@ ApplicationWindow {
                             ["z", "tall log, and back"],
                             ["w", "wrap long log lines, and back"],
                             ["m", "only main, and back"],
-                            ["f", "only this branch, and back"],
+                            win.watchingOrg ? ["u", "filter by PR author"] : ["f", "only this branch, and back"],
                             ["a", "only running builds, and back"],
                             ["s", "show or hide skipped builds"],
                             ["pgup / pgdn", "scroll the log"],
                             ["home / end", "top of the log, follow the end"],
                             ["space / r", "refresh now"],
-                            ["g", "watch another repository"],
+                            ["g", "watch a repository or organization"],
                             ["esc", "close this, or the tall log"],
                             ["?", "show or hide this help"], ["q", "quit"]
                         ]

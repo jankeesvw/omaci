@@ -127,11 +127,11 @@ int main(int argc, char *argv[]) {
     app.setWindowIcon(QIcon::fromTheme("omaci"));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription("The builds of one repository, live: how far, how long still, and what failed.");
+    parser.setApplicationDescription("Live GitHub Actions builds for a repository or an organization.");
     parser.addHelpOption();
     parser.addVersionOption();
-    parser.addPositionalArgument("repo", "The repository to watch, as owner/name. Without one: the repository of "
-                                         "the current directory, or else the one watched last, or else a menu of yours.");
+    parser.addPositionalArgument("target", "Watch a repository as owner/name or an organization as org:name. "
+                                           "Without a target, use the current checkout or the last target.");
     QCommandLineOption shaOption("sha", "Open on the build of this commit.", "sha");
     parser.addOption(shaOption);
     QCommandLineOption demoOption("demo", "Show invented builds instead of asking GitHub, for screenshots and trying it out.");
@@ -156,6 +156,10 @@ int main(int argc, char *argv[]) {
     const bool demo = parser.isSet(demoOption);
     const bool shot = parser.isSet(screenshotOption);
     auto repo = parser.positionalArguments().value(0);
+    if (demo && repo.trimmed().startsWith("org:", Qt::CaseInsensitive)) {
+        qWarning("The demo shows an example repository. Organization watching uses live GitHub data.");
+        return 2;
+    }
     if (repo.isEmpty())
         repo = demo ? QString("acme/storefront") : repoOfDirectory();
     const auto sha = parser.value(shaOption).toLower();
@@ -172,7 +176,8 @@ int main(int argc, char *argv[]) {
     Theme theme(parser.isSet(themeOption) ? parser.value(themeOption) : shot ? QString("/nonexistent/omaci") : QString());
     if (parser.isSet(radiusOption))
         theme.setRadius(parser.value(radiusOption).toInt());
-    Backend backend(repo, demo);
+    Backend backend({}, demo);
+    backend.show(repo, sha);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("theme", &theme);
@@ -213,6 +218,5 @@ int main(int argc, char *argv[]) {
         screenshot(window, &backend, parser.value(sceneOption).split(',', Qt::SkipEmptyParts), parser.value(screenshotOption));
     }
 
-    backend.show(repo, sha);
     return app.exec();
 }
