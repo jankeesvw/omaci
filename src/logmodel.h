@@ -6,9 +6,10 @@
 #include "failures.h"
 #include "github.h"
 
-// The log of one job, line by line. A running job's log is fetched again on
-// every poll; when the new text only adds lines, they're appended so the view
-// keeps its place instead of jumping back to the top.
+// The log of one job, line by line. A running job's log grows a step at a
+// time, and the whole log follows on from it once the job is done; when the
+// new text only adds lines, they're appended so the view keeps its place
+// instead of jumping back to the top.
 //
 // Besides the text, a line knows whether a step starts on it (the view draws
 // a heading there) and whether it is part of a failure.

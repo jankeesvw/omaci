@@ -2,7 +2,7 @@
 
 <img src="screenshots/demo.gif" width="800" alt="Omaci on an Omarchy desktop: a running build with about 3m 20s left and its log growing, then the build that failed, opened on its two failing tests, back to the running one, another job, and the menu of repositories narrowed down by typing">
 
-The builds of one repository, live, in a window of their own. How far the build is and about how long it still has, worked out from how long the earlier ones took. Its jobs on a timeline, the steps of the one you picked, and its log, growing at the bottom while the job is still running.
+The builds of one repository, live, in a window of their own. How far the build is and about how long it still has, worked out from how long the earlier ones took. Its jobs on a timeline, the steps of the one you picked, and its log, growing a step at a time while the job is still running.
 
 A bar widget can tell you that a build is red. It cannot tell you why, and finding out means a browser tab, three clicks into GitHub's Actions page, and a log viewer that loads a few thousand lines into a web page and scrolls them like one. This is the other half: open the build and the failing job is already selected, with the log on the test that failed rather than on the exit code that came after it, and one key copies the link to hand to somebody else.
 
@@ -100,7 +100,7 @@ A failed job opens with the first failure at the top of the log, and a panel abo
 
 The list is drawn the way `git log --graph` draws history: the builds of the default branch sit on a line down the left, with the branch name in the accent colour, and the builds of every other branch (pull requests, Dependabot, a scheduled run) hang off that line, set in, with a dimmer title and their branch name in a colour of its own. The heading of a build that is not on main says so.
 
-Every step is a way into the log. Click one, or press `N` and `P`, and the log shows where that step ends, at the bottom of the view, because that is where its outcome is: the summary of a test run, or the error a command stopped on. A step that is still running is followed as it writes. The log has a heading at each of those places, and while you scroll, the step you are reading is the one marked in the list. Steps that were skipped wrote nothing and cannot be clicked.
+Every step is a way into the log. Click one, or press `N` and `P`, and the log shows where that step ends, at the bottom of the view, because that is where its outcome is: the summary of a test run, or the error a command stopped on. The step that is still running takes you to the end of the log, where its lines will come. The log has a heading at each of those places, and while you scroll, the step you are reading is the one marked in the list. Steps that were skipped wrote nothing and cannot be clicked.
 
 ## Handing it to somebody else
 
@@ -110,11 +110,11 @@ Every step is a way into the log. Click one, or press `N` and `P`, and the log s
 
 ## Following a running build
 
-While anything is running, Omaci asks GitHub every 6 seconds; when everything is done, once a minute, and right away when you press `Space`, `R` or `Ctrl+R`. The log of a running job is fetched again on every poll, and when it only grew, the new lines are added to the bottom rather than the whole log being replaced, so the view keeps its place.
+While anything is running, Omaci asks GitHub every 6 seconds; when everything is done, once a minute, and right away when you press `Space`, `R` or `Ctrl+R`. The log of a running job grows a step at a time, because that is how GitHub publishes it: the log of a step once that step is done, the log of the whole job only once the job is. Every step that finishes is fetched once and its lines are added to the bottom, so the view keeps its place, and under them the step that is still running waits as a heading of its own. When the job is done, the whole log carries on from what was there.
 
 It follows the end as long as you are at the end. Scroll up to read something and it stops, and a button in the corner brings it back, as does `End`. Scroll back down to the bottom and it follows again.
 
-GitHub only publishes a job's log once the runner has uploaded the first part of it, so a job that just started shows its steps for a few seconds before it has a log.
+Line by line, the way the Actions page in a browser shows it, is not possible. GitHub streams that to a browser that is logged in to the website and gives nothing like it to the API that `gh` uses, so a long step, the tests say, shows its lines when it is done, all at once.
 
 When a build you saw running finishes, you get a desktop notification saying whether it passed and how long it took. Builds that were already done when the window opened stay quiet. The time left is in the window's title as well, so the window switcher shows it.
 
@@ -155,7 +155,7 @@ Every one of these is also something you can click.
 
 GitHub allows 5000 requests an hour per user, shared with everything else that uses your `gh` login.
 
-The list of runs is one request a poll, and so are the jobs of each run of your build that is still going. Both are sent with the `ETag` of the previous answer, and GitHub does not count the "nothing changed" it then usually sends back, so those only cost something when a run or a step actually moved. The log of the running job is one request a poll and always counts: about 600 an hour while you watch a build. A finished run's jobs are fetched once and kept for as long as the window is open.
+The list of runs is one request a poll, and so are the jobs of each run of your build that is still going. Both are sent with the `ETag` of the previous answer, and GitHub does not count the "nothing changed" it then usually sends back, so those only cost something when a run or a step actually moved. A log always counts: one request for each step of the running job as it finishes, and one for the whole log once a job is done. A step is fetched once and kept, so going back to a job costs nothing. A finished run's jobs are fetched once and kept for as long as the window is open.
 
 The menu of repositories is one request per hundred repositories, when you open it, and again at most every five minutes.
 
@@ -177,7 +177,7 @@ The one thing written to disk is the name of the repository you watched last, in
 omaci --demo
 ```
 
-Invented builds for an invented `acme/storefront`: one running, with a log that grows and a deploy still to come, one that failed in two tests, and a dozen earlier ones to estimate from. It really runs: leave it open for a few minutes and the build deploys and passes. The screenshots above are that.
+Invented builds for an invented `acme/storefront`: one running, with a log that grows a step at a time and a deploy still to come, one that failed in two tests, and a dozen earlier ones to estimate from. It really runs: leave it open for a few minutes and the build deploys and passes. The screenshots above are that.
 
 ## Building
 

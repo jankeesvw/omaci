@@ -906,6 +906,71 @@ private slots:
         QCOMPARE(backend.selectedJobId(), 10LL);
     }
 
+    // GitHub has no log of a running job, only of the steps it has done. The
+    // log is those, in order, growing at the bottom as more come in, and the
+    // whole log carries on from them once the job is done.
+    void backendShowsTheLogOfARunningJobStepByStep()
+    {
+        Backend backend("owner/repo");
+        backend.setOffline(true);
+        auto step = [](int number, const QString &name, const QString &state, int start, int end) {
+            return QVariantMap{{"number", number}, {"name", name}, {"state", state},
+                               {"startedAt", start < 0 ? QString() : at(start)},
+                               {"completedAt", end < 0 ? QString() : at(end)}};
+        };
+        auto running = job(10, "running");
+        running["steps"] = QVariantList{step(1, "Set up job", "success", 0, 2), step(2, "Check out", "success", 2, 3),
+                                        step(3, "Lint", "skipped", -1, -1), step(4, "Run tests", "running", 3, -1),
+                                        step(5, "Complete job", "queued", -1, -1)};
+        backend.applyRuns({run(1, "running")});
+        backend.applyJobs(1, {running}, false);
+        QCOMPARE(backend.selectedJobId(), 10LL);
+
+        const QByteArray setUp = "2026-11-25T09:00:00.1000000Z Current runner version: '2.338.2'\n"
+                                 "2026-11-25T09:00:01.5000000Z Complete job name: test\n";
+        const QByteArray checkout = "2026-11-25T09:00:02.2000000Z ##[group]Run actions/checkout@v6\n"
+                                    "2026-11-25T09:00:02.9000000Z Switched to a new branch 'main'\n";
+        const QByteArray tests = "2026-11-25T09:00:03.1000000Z ##[group]Run bin/rails test\n"
+                                 "2026-11-25T09:00:07.8000000Z 96 runs, 0 failures\n";
+        const QByteArray complete = "2026-11-25T09:00:08.2000000Z Cleaning up orphan processes\n";
+
+        // The steps come back in any order; the log waits for the one before.
+        QSignalSpy reset(&backend, &Backend::logReset);
+        backend.applyStepLog(10, 2, checkout);
+        QCOMPARE(backend.log()->rowCount(), 0);
+        backend.applyStepLog(10, 1, "\xEF\xBB\xBF" + setUp);
+        QCOMPARE(backend.log()->rowCount(), 4);
+        QCOMPARE(reset.size(), 1);
+        QCOMPARE(backend.log()->lines().first().text, QString("Current runner version: '2.338.2'"));
+
+        // Every step that is in has its place, and the running one is next,
+        // at the end of the log: N goes there, past the skipped one.
+        QCOMPARE(backend.logPending(), QString("Run tests"));
+        QCOMPARE(backend.logStatus(), QString());
+        QCOMPARE(backend.steps()[1].toMap()["line"].toInt(), 2);
+        QCOMPARE(backend.steps()[3].toMap()["line"].toInt(), -1);
+        QVERIFY(backend.steps()[3].toMap()["pending"].toBool());
+        QCOMPARE(backend.moveStep(1, 1), 3);
+
+        // Done: the whole log is added below what was there, not swapped in.
+        auto done = running;
+        done["state"] = "success";
+        done["completedAt"] = at(9);
+        auto steps = running["steps"].toList();
+        steps[3] = step(4, "Run tests", "success", 3, 8);
+        steps[4] = step(5, "Complete job", "success", 8, 9);
+        done["steps"] = steps;
+        backend.applyJobs(1, {done}, true);
+        QSignalSpy inserted(backend.log(), &QAbstractItemModel::rowsInserted);
+        backend.applyLog(10, "\xEF\xBB\xBF" + setUp + checkout + tests + complete);
+        QCOMPARE(backend.log()->rowCount(), 7);
+        QCOMPARE(inserted.size(), 1);
+        QCOMPARE(reset.size(), 1);
+        QCOMPARE(backend.logPending(), QString());
+        QVERIFY(!backend.steps()[3].toMap()["pending"].toBool());
+        QCOMPARE(backend.steps()[3].toMap()["line"].toInt(), 4);
+    }
+
     void backendAnnouncesFinishedBuilds()
     {
         Backend backend("owner/repo");
@@ -1154,6 +1219,17 @@ private slots:
         QCOMPARE(states["build"].toString(), QString("running"));
         QCOMPARE(states["test"].toString(), QString("running"));
         QVERIFY(!states.contains("deploy")); // GitHub creates it when the others are done.
+
+        // Its logs are there the way GitHub has them: a step's once the step
+        // is done, the job's once the job is, and before that a 404.
+        {
+            const auto started = QDateTime::currentDateTimeUtc().addSecs(192 - 200);
+            QVERIFY(Demo::respond("repos/acme/storefront/actions/jobs/90282/logs", started).isNull());
+            QVERIFY(Demo::respond("repos/acme/storefront/actions/jobs/90282/steps/8/logs", started).isNull());
+            const auto setUp = Demo::respond("repos/acme/storefront/actions/jobs/90282/steps/1/logs", started);
+            QVERIFY(GitHub::parseLog(setUp).first().text.startsWith("Current runner version"));
+            QVERIFY(!Demo::respond("repos/acme/storefront/actions/jobs/90281/logs", started).isNull());
+        }
         states = jobsAt(360);
         QCOMPARE(states["test"].toString(), QString("success"));
         QCOMPARE(states["deploy"].toString(), QString("running"));
@@ -1193,7 +1269,9 @@ private slots:
         // know which branch main is.
         QCOMPARE(backend.property("mainBranch").toString(), QString("main"));
         QTRY_COMPARE(backend.estimate()["basis"].toString(), QString("jobs"));
+        // Made of the steps that are done, with the one at work next.
         QTRY_VERIFY(backend.log()->rowCount() > 20);
+        QTRY_COMPARE(backend.logPending(), QString("RSpec tests"));
         QVERIFY(window->property("headline").toString().startsWith("About "));
         bool deployExpected = false;
         for (const auto &job : backend.jobs())

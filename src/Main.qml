@@ -144,14 +144,15 @@ ApplicationWindow {
     }
     // A step opens on its end, at the bottom of the view, because that is
     // where its outcome is: the summary of a test run, the error a command
-    // died on. A step still writing is followed as it grows.
+    // died on. The step still running is at the end of the log, where its
+    // own log will come once GitHub has it, and is followed there.
     function showStep(index) {
         const step = backend.steps[index]
-        if (!step || step.line < 0) return
-        const last = win.stepEnd(index)
+        if (!step || (step.line < 0 && !step.pending)) return
+        const last = step.pending ? logView.count - 1 : win.stepEnd(index)
         logView.highlighted = -1
         followAnimation.stop()
-        if (step.state === "running" && last >= logView.count - 1) {
+        if (step.pending || (step.state === "running" && last >= logView.count - 1)) {
             logView.follow = true
             logView.toEnd(false)
             return
@@ -163,7 +164,7 @@ ApplicationWindow {
     }
     function jumpToStep(index) {
         const step = backend.steps[index]
-        if (!step || step.line < 0) return
+        if (!step || (step.line < 0 && !step.pending)) return
         win.focusPanel = "steps"
         backend.selectStep(index)
         win.showStep(index)
@@ -744,7 +745,7 @@ ApplicationWindow {
                                         id: stepRow
                                         required property var modelData
                                         required property int index
-                                        readonly property bool reachable: modelData.line >= 0
+                                        readonly property bool reachable: modelData.line >= 0 || modelData.pending
                                         readonly property bool current: backend.selectedStep >= 0 ? backend.selectedStep === index
                                                                                                   : logView.readingStep === index
                                         readonly property real textY: Math.round((height - win.ch) / 2)
@@ -975,6 +976,46 @@ ApplicationWindow {
                                     addDisplaced: Transition {
                                         NumberAnimation { property: "y"; duration: 300; easing.type: Easing.OutCubic }
                                     }
+                                    // The step that is still running, as the next chapter:
+                                    // GitHub publishes a step's log only once it is done,
+                                    // and then it takes this place.
+                                    footer: Item {
+                                        width: logView.width
+                                        visible: backend.logPending !== ""
+                                        height: visible ? Math.round(logView.lineHeight * 2.5) + 4 : 0
+                                        Item {
+                                            width: parent.width
+                                            height: Math.round(logView.lineHeight * 1.5)
+                                            Rectangle {
+                                                y: Math.round(parent.height / 2)
+                                                width: parent.width - win.cw
+                                                height: 1
+                                                color: theme.line
+                                            }
+                                            Rectangle {
+                                                x: logView.timeWidth - win.cw
+                                                y: Math.round((parent.height - win.ch) / 2)
+                                                width: pendingHeading.implicitWidth + win.cw * 2
+                                                height: win.ch
+                                                color: theme.background
+                                                Row {
+                                                    id: pendingHeading
+                                                    x: win.cw
+                                                    spacing: win.cw
+                                                    StatusIcon { state: "running" }
+                                                    Mono { text: backend.logPending; color: theme.accent; font.bold: true }
+                                                }
+                                            }
+                                        }
+                                        Mono {
+                                            x: logView.timeWidth
+                                            y: Math.round(logView.lineHeight * 1.5 + (logView.lineHeight - win.ch) / 2)
+                                            width: logView.width - x - win.cw
+                                            elide: Text.ElideRight
+                                            text: "GitHub shows the log of a step once the step is done"
+                                            color: theme.dim
+                                        }
+                                    }
                                     anchors.fill: parent
                                     clip: true
                                     model: backend.log
@@ -1071,6 +1112,10 @@ ApplicationWindow {
 
                                 Connections {
                                     target: backend
+                                    // The next step heading appears at the end, or moves on.
+                                    function onLogStatusChanged() {
+                                        if (logView.follow) Qt.callLater(logView.toEnd, true)
+                                    }
                                     function onLogReset() {
                                         logView.highlighted = -1
                                         win.failureIndex = -1
@@ -1091,7 +1136,7 @@ ApplicationWindow {
                                     width: parent.width * 0.7
                                     horizontalAlignment: Text.AlignHCenter
                                     wrapMode: Text.Wrap
-                                    visible: backend.logStatus !== "" && logView.count === 0
+                                    visible: backend.logStatus !== "" && logView.count === 0 && backend.logPending === ""
                                     text: backend.logStatus
                                     color: theme.dim
                                 }

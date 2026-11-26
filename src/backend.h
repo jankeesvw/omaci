@@ -29,6 +29,10 @@ class Backend : public QObject {
     Q_PROPERTY(int selectedStep READ selectedStep NOTIFY stepsChanged)
     Q_PROPERTY(LogModel *log READ log CONSTANT)
     Q_PROPERTY(QString logStatus READ logStatus NOTIFY logStatusChanged)
+    // The step a running job's log stops at. GitHub publishes the log of a
+    // step once the step is done and the log of a job once the job is, so a
+    // running job's log is the steps that are done, and this one is next.
+    Q_PROPERTY(QString logPending READ logPending NOTIFY logStatusChanged)
     Q_PROPERTY(QVariantList failures READ failures NOTIFY failuresChanged)
     Q_PROPERTY(QVariantMap estimate READ estimate NOTIFY estimateChanged)
     Q_PROPERTY(QVariantList history READ history NOTIFY historyChanged)
@@ -68,6 +72,7 @@ public:
     int selectedStep() const { return m_step; }
     LogModel *log() { return &m_log; }
     QString logStatus() const { return m_logStatus; }
+    QString logPending() const { return m_logPending; }
     QVariantList failures() const { return m_failures; }
     QVariantMap estimate() const { return m_estimate; }
     QVariantList history() const { return m_history; }
@@ -132,6 +137,8 @@ public:
     void applyRuns(const QVariantList &runs);
     void applyJobs(qlonglong runId, const QVariantList &jobs, bool final = true);
     void applyLog(qlonglong jobId, const QByteArray &raw, bool final = true);
+    // The log of one step of a running job, by its number.
+    void applyStepLog(qlonglong jobId, int number, const QByteArray &raw);
 
 signals:
     void repoChanged();
@@ -165,6 +172,14 @@ private:
         bool final = false;
         QString updatedAt;
     };
+    // The logs of the steps of one job that are in, by step number.
+    struct StepLogs {
+        QHash<int, QList<GitHub::LogLine>> lines;
+        QSet<int> inFlight;
+        // A step GitHub had no log for yet: how often, and when to ask again.
+        QHash<int, int> misses;
+        QHash<int, qint64> retryAt;
+    };
 
     void gh(const QStringList &args, Done done);
     void pump();
@@ -175,6 +190,9 @@ private:
     void fetchJobs();
     void fetchRunJobs(qlonglong runId, bool final, const QString &updatedAt);
     void fetchLog();
+    void fetchStepLogs(const QVariantMap &job);
+    void showStepLogs(qlonglong jobId);
+    void applyLines(qlonglong jobId, const QList<GitHub::LogLine> &lines, bool final);
     void rebuildJobs();
     void computeEstimate();
     void computePrevious();
@@ -190,7 +208,7 @@ private:
     QList<Estimate::Earlier> earlierBuilds(const QVariantList &like) const;
     QHash<QString, double> usualSteps(const QString &jobKey) const;
     void setError(const QString &error);
-    void setLogStatus(const QString &status);
+    void setLogStatus(const QString &status, const QString &pending = {});
     void schedule();
     void notify(const QVariantMap &build);
 
@@ -228,6 +246,8 @@ private:
     bool m_fetchingLog = false;
     LogModel m_log;
     QString m_logStatus;
+    QString m_logPending;
+    QHash<qlonglong, StepLogs> m_stepLogs;
     QList<Failures::Failure> m_found;
     QVariantList m_failures;
 

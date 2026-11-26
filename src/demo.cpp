@@ -372,18 +372,17 @@ QStringList failureText() {
             ""};
 }
 
-// The work step: output that grows while the step runs.
-QStringList work(const Job &job, const Step &step, double elapsed) {
+// What the step that does the work wrote, by the time it was done.
+QStringList work(const Job &job, const Step &step) {
     QStringList lines;
     if (step.name == "RSpec tests") {
         lines << "##[group]Run bundle exec parallel_rspec" << "bundle exec parallel_rspec"
               << "shell: /usr/bin/bash -e {0}" << "env:" << "  RAILS_ENV: test" << "##[endgroup]"
               << "Using recorded test runtime" << "4 processes for 96 specs, ~ 24 specs per process";
-        const double until = qMin(elapsed, step.end);
-        const int shown = int(qMax(0.0, until - step.start) / 1.5);
+        const int shown = int((step.end - step.start) / 1.5);
         for (int i = 0; i < shown; ++i)
             lines << QString("%1 (%2s)").arg(examples[i % examples.size()]).arg(0.08 + (i * 37 % 50) / 100.0, 0, 'f', 2);
-        if (elapsed >= step.end && job.outcome == "failure") {
+        if (job.outcome == "failure") {
             lines << failureText();
             // The other processes finish after the one that failed, which is
             // what buries a failure in a real log.
@@ -395,45 +394,66 @@ QStringList work(const Job &job, const Step &step, double elapsed) {
             }
             lines << "Tests Failed" << "" << "312 examples, 2 failures" << "" << "Took 133 seconds"
                   << "##[error]Process completed with exit code 1.";
-        } else if (elapsed >= step.end) {
+        } else {
             lines << "" << "312 examples, 0 failures" << "" << QString("Took %1 seconds").arg(int(step.end - step.start));
         }
         return lines;
     }
     lines << "##[group]Run " + step.name.toLower() << "##[endgroup]";
-    const double until = qMin(elapsed, step.end);
-    const int shown = int(qMax(0.0, until - step.start) / 3);
+    const int shown = int((step.end - step.start) / 3);
     for (int i = 0; i < shown; ++i)
         lines << QString("%1: part %2 done").arg(step.name).arg(i + 1);
     return lines;
 }
 
+// What one step wrote, with the times it wrote it at.
+QByteArray written(const Build &build, const Job &job, const Step &step) {
+    const auto base = startOf(build);
+    const bool isWork = step.end - step.start > 12 || step.outcome == "failure";
+    const auto lines = isWork ? work(job, step) : chatter(step.name);
+    const double until = qMax(step.start + 0.4, step.end - 0.05);
+    const double gap = lines.size() > 1 ? (until - step.start - 0.15) / (lines.size() - 1) : 0;
+    QByteArray out;
+    for (int n = 0; n < lines.size(); ++n) {
+        const auto when = base.addMSecs(qint64((step.start + 0.15 + qMax(0.0, gap) * n) * 1000));
+        out += (when.toString(Qt::ISODateWithMs) + " " + lines[n] + "\n").toUtf8();
+    }
+    return out;
+}
+
+// The job with this id, or one with id 0.
+Job jobOf(const Build &build, qint64 jobId) {
+    for (const auto &job : plan(build, (jobId / 10) % 2 == 1))
+        if (job.id == jobId)
+            return job;
+    return {};
+}
+
+// The way GitHub has them: the log of a job once the job is done, the log of
+// a step once the step is, and nothing (a 404) before that.
 QByteArray log(qint64 jobId) {
     const auto *build = buildOfRun(jobId / 10);
     if (!build)
         return "2026-01-01T10:00:00.0000000Z Nothing to see in this job.\n";
-    const bool linting = (jobId / 10) % 2 == 1;
-    const double elapsed = elapsedOf(*build);
-    const auto base = startOf(*build);
+    const auto job = jobOf(*build, jobId);
+    if (!job.id || elapsedOf(*build) < job.end)
+        return {};
     QByteArray out;
-    for (const auto &job : plan(*build, linting)) {
-        if (job.id != jobId)
-            continue;
-        for (int i = 0; i < job.steps.size(); ++i) {
-            const auto &step = job.steps[i];
-            if (elapsed < step.start || step.outcome == "skipped")
-                continue;
-            const bool isWork = step.end - step.start > 12 || step.outcome == "failure";
-            const auto lines = isWork ? work(job, step, elapsed) : chatter(step.name);
-            const double until = qMin(elapsed, qMax(step.start + 0.4, step.end - 0.05));
-            const double gap = lines.size() > 1 ? (until - step.start - 0.15) / (lines.size() - 1) : 0;
-            for (int n = 0; n < lines.size(); ++n) {
-                const auto when = base.addMSecs(qint64((step.start + 0.15 + qMax(0.0, gap) * n) * 1000));
-                out += (when.toString(Qt::ISODateWithMs) + " " + lines[n] + "\n").toUtf8();
-            }
-        }
-    }
+    for (const auto &step : job.steps)
+        if (step.outcome != "skipped")
+            out += written(*build, job, step);
     return out;
+}
+
+QByteArray stepLog(qint64 jobId, int number) {
+    const auto *build = buildOfRun(jobId / 10);
+    const auto job = build ? jobOf(*build, jobId) : Job{};
+    if (!job.id || number < 1 || number > job.steps.size())
+        return {};
+    const auto &step = job.steps[number - 1];
+    if (step.outcome == "skipped" || elapsedOf(*build) < step.end)
+        return {};
+    return written(*build, job, step);
 }
 
 // What `user/repos` would list for someone at the invented shop: their own
@@ -475,8 +495,12 @@ QByteArray respond(const QString &path, const QDateTime &started) {
     const auto parts = bare.split('/');
     if (bare == "user/repos")
         return repositories();
-    if (bare.endsWith("/logs"))
+    if (bare.endsWith("/logs")) {
+        const int steps = parts.indexOf("steps");
+        if (steps > 0)
+            return stepLog(parts.value(steps - 1).toLongLong(), parts.value(steps + 1).toInt());
         return log(parts.value(parts.size() - 2).toLongLong());
+    }
     if (bare.endsWith("/jobs"))
         return jobs(parts.value(parts.size() - 2).toLongLong());
     if (parts.size() == 3 && parts.value(0) == "repos")

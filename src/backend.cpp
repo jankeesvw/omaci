@@ -19,10 +19,14 @@
 // Poll every few seconds while a build is moving, and back off when it's
 // quiet. The list of runs and the jobs are asked for with the ETag of the
 // last answer, and GitHub doesn't count "not modified" against the hourly
-// limit, so most polls cost one request: the log.
+// limit, so most polls cost nothing. A log costs a request each time: one
+// per step of a running job as the step finishes, one for a finished job.
 static constexpr int ActiveInterval = 6000;
 static constexpr int IdleInterval = 60000;
 static constexpr int MaxProcesses = 4;
+// A step that is done but whose log GitHub doesn't have yet is asked for
+// again a poll later, a few times, and then left out.
+static constexpr int MaxStepMisses = 5;
 // How many earlier builds' jobs the forecast is made from. Each costs a
 // request per run, once.
 static constexpr int EarlierBuilds = 6;
@@ -97,9 +101,14 @@ int Backend::activeCount() const {
 void Backend::gh(const QStringList &args, Done done) {
     if (m_demo) {
         // Answered a moment later, the way a real call is, so the window goes
-        // through the same states.
+        // through the same states. No answer is GitHub's 404.
         const auto out = Demo::respond(args.last(), m_started);
-        QTimer::singleShot(40, this, [done, out] { done(true, out, {}); });
+        QTimer::singleShot(40, this, [done, out] {
+            if (out.isNull())
+                done(false, {}, "gh: Not Found (HTTP 404)");
+            else
+                done(true, out, {});
+        });
         return;
     }
     if (m_offline)
@@ -807,6 +816,7 @@ void Backend::annotateLog() {
         auto step = steps[i].toMap();
         const auto state = step["state"].toString();
         step["line"] = starts.value(i, -1);
+        step["pending"] = mine && GitHub::isActive(state) && step["name"] == m_logPending;
         step["seconds"] = GitHub::isActive(state) || state == "skipped"
                               ? 0
                               : GitHub::secondsBetween(step["startedAt"].toString(), step["completedAt"].toString());
@@ -859,40 +869,130 @@ void Backend::fetchLog() {
     }
     if (m_logJobId == m_jobId && m_logFinal)
         return;
+    // GitHub has no log of a running job, only of the steps it has done.
+    if (GitHub::isActive(state)) {
+        fetchStepLogs(job);
+        return;
+    }
 
     const auto jobId = m_jobId;
-    const bool final = !GitHub::isActive(state);
-    if (m_logJobId != jobId)
-        setLogStatus("Loading log…");
+    // What was shown while it ran stays until the whole log is here, and
+    // nothing is pending any more.
+    setLogStatus(m_logJobId == jobId ? QString() : QString("Loading log…"));
     m_fetchingLog = true;
     gh({"api", "--allow-escape-sequences", QString("repos/%1/actions/jobs/%2/logs").arg(m_repo).arg(jobId)},
-       [this, jobId, final](bool ok, const QByteArray &out, const QString &err) {
+       [this, jobId](bool ok, const QByteArray &out, const QString &err) {
            m_fetchingLog = false;
            if (jobId != m_jobId) {
                fetchLog();
                return;
            }
            if (!ok) {
-               // GitHub only serves a job's log once the runner has uploaded
-               // some of it, which lags behind a job that has just started.
-               if (!final)
-                   setLogStatus("Waiting for GitHub to publish the log of this running job…");
-               else
-                   setLogStatus(err.isEmpty() ? "GitHub didn't return a log for this job." : err);
+               // Asked again on the next poll: a job that has only just
+               // finished can be a moment ahead of its log.
+               setLogStatus(err.isEmpty() ? "GitHub didn't return a log for this job." : err);
                return;
            }
-           applyLog(jobId, out, final);
+           applyLog(jobId, out, true);
        });
 }
 
+// A running job's log, a step at a time. Each step that is done is asked
+// for once, and kept for as long as the window shows this repository, so
+// going back to a job costs nothing.
+void Backend::fetchStepLogs(const QVariantMap &job) {
+    const auto jobId = job["id"].toLongLong();
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    auto &kept = m_stepLogs[jobId];
+    for (const auto &value : job["steps"].toList()) {
+        const auto step = value.toMap();
+        const int number = step["number"].toInt();
+        const auto state = step["state"].toString();
+        if (number <= 0 || GitHub::isActive(state) || state == "skipped" || kept.lines.contains(number) ||
+            kept.inFlight.contains(number) || kept.misses.value(number) >= MaxStepMisses ||
+            kept.retryAt.value(number) > now)
+            continue;
+        kept.inFlight << number;
+        gh({"api", "--allow-escape-sequences",
+            QString("repos/%1/actions/jobs/%2/steps/%3/logs").arg(m_repo).arg(jobId).arg(number)},
+           [this, repo = m_repo, jobId, number](bool ok, const QByteArray &out, const QString &) {
+               if (repo != m_repo)
+                   return;
+               auto &kept = m_stepLogs[jobId];
+               kept.inFlight.remove(number);
+               if (ok) {
+                   applyStepLog(jobId, number, out);
+                   return;
+               }
+               ++kept.misses[number];
+               kept.retryAt[number] = QDateTime::currentMSecsSinceEpoch() + ActiveInterval - 1000;
+               showStepLogs(jobId);
+           });
+    }
+    showStepLogs(jobId);
+}
+
+void Backend::applyStepLog(qlonglong jobId, int number, const QByteArray &raw) {
+    m_stepLogs[jobId].lines[number] = GitHub::parseLog(raw);
+    showStepLogs(jobId);
+}
+
+// The steps that are in, in order, up to the first one that isn't: steps
+// arrive in any order, and a log that only grows at the bottom keeps the
+// place of whoever is reading it.
+void Backend::showStepLogs(qlonglong jobId) {
+    if (jobId != m_jobId || (m_logJobId == jobId && m_logFinal))
+        return;
+    const auto job = selectedJob();
+    if (!GitHub::isActive(job["state"].toString()))
+        return;
+    const auto kept = m_stepLogs.value(jobId);
+    // Steps asked for together are shown together, in one go: a job opened
+    // some steps in, or two steps that finished in the same poll. Lines that
+    // arrive one batch after the other while the first still slide in can
+    // be left halfway, invisible.
+    if (!kept.inFlight.isEmpty()) {
+        if (m_logJobId != jobId)
+            setLogStatus("Loading log…");
+        return;
+    }
+    QList<GitHub::LogLine> lines;
+    QString pending;
+    for (const auto &value : job["steps"].toList()) {
+        const auto step = value.toMap();
+        const int number = step["number"].toInt();
+        const auto state = step["state"].toString();
+        if (state == "skipped")
+            continue;
+        if (kept.lines.contains(number)) {
+            lines += kept.lines[number];
+            continue;
+        }
+        // Done, but GitHub never had its log: the steps after it still count.
+        if (!GitHub::isActive(state) && kept.misses.value(number) >= MaxStepMisses)
+            continue;
+        // A step that is done is a moment away; one that runs, until it is done.
+        if (GitHub::isActive(state))
+            pending = step["name"].toString();
+        break;
+    }
+    if (!lines.isEmpty())
+        applyLines(jobId, lines, false);
+    setLogStatus(lines.isEmpty() && pending.isEmpty() && m_logJobId != jobId ? "Loading log…" : QString(), pending);
+}
+
 void Backend::applyLog(qlonglong jobId, const QByteArray &raw, bool final) {
+    applyLines(jobId, GitHub::parseLog(raw), final);
+}
+
+void Backend::applyLines(qlonglong jobId, const QList<GitHub::LogLine> &lines, bool final) {
     if (jobId != m_jobId)
         return;
     const bool reset = m_logJobId != jobId;
     m_logJobId = jobId;
     m_logFinal = final;
-    m_log.setLines(GitHub::parseLog(raw));
-    setLogStatus({});
+    m_log.setLines(lines);
+    setLogStatus({}, final ? QString() : m_logPending);
     annotateLog();
     if (reset)
         emit logReset();
@@ -953,7 +1053,7 @@ void Backend::moveJob(int delta) {
 
 int Backend::moveStep(int from, int delta) {
     for (int i = from + delta; i >= 0 && i < m_steps.size(); i += delta) {
-        if (m_steps[i].toMap()["line"].toInt() >= 0) {
+        if (m_steps[i].toMap()["line"].toInt() >= 0 || m_steps[i].toMap()["pending"].toBool()) {
             selectStep(i);
             return i;
         }
@@ -985,6 +1085,7 @@ void Backend::show(const QString &asked, const QString &sha) {
         m_extraRuns.clear();
         m_allBuilds.clear();
         m_jobsOfRun.clear();
+        m_stepLogs.clear();
         m_defaultBranch.clear();
         m_kept.clear();
         m_branch.clear();
@@ -1171,11 +1272,16 @@ void Backend::setError(const QString &error) {
     emit errorChanged();
 }
 
-void Backend::setLogStatus(const QString &status) {
-    if (status == m_logStatus)
+void Backend::setLogStatus(const QString &status, const QString &pending) {
+    if (status == m_logStatus && pending == m_logPending)
         return;
+    const bool moved = pending != m_logPending;
     m_logStatus = status;
+    m_logPending = pending;
     emit logStatusChanged();
+    // The step the log waits for is a place in it too: the end.
+    if (moved)
+        annotateLog();
 }
 
 void Backend::notify(const QVariantMap &build) {
