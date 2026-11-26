@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
 
     QGuiApplication app(argc, argv);
     app.setApplicationName("omaci");
-    app.setApplicationVersion("0.4.0");
+    app.setApplicationVersion("0.4.1");
 
     // Matches the window to omaci.desktop, so the compositor (Wayland app_id)
     // and the launcher pick up the installed icon.
